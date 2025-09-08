@@ -1,0 +1,18 @@
+# Build
+/build/
+/cmake-build-*/
+*.o
+*.obj
+*.a
+*.lib
+*.dll
+*.so
+*.dylib
+
+# IDE
+.vscode/
+.idea/
+
+# Misc
+*.log
+*.DS_Store

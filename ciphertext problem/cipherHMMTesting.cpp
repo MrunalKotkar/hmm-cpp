@@ -1,0 +1,355 @@
+#include <iostream>
+#include <vector>
+#include <string>
+#include <fstream>
+#include <cstdlib>
+#include <cmath>
+#include <cctype>
+#include <iomanip>
+
+using namespace std;
+
+const int N = 26;   // number of hidden states
+const int M = 26;  // 26 letters
+const string ALPHABET = "abcdefghijklmnopqrstuvwxyz";
+static const int SHIFT = 18; // <-- set to your Caesar key (e.g., 18)
+const int MAX_T = 1000; //maximum character to read from the file
+
+// Step struct: one time step of the sequence
+struct Step {
+    int obs;
+    vector<double> alpha, beta, gamma;
+    vector<vector<double>> diGamma;
+    double c;
+
+    Step() {
+        alpha.assign(N, 0.0);
+        beta.assign(N, 0.0);
+        gamma.assign(N, 0.0);
+        diGamma.assign(N, vector<double>(N, 0.0));
+        c = 0.0;
+    }
+};
+
+// Printing matrices
+void printPi(const vector<double>& pi) {
+    double sum = 0;
+    for (auto val : pi) { cout << val << " "; sum += val; }
+    cout << ", sum=" << sum << endl;
+}
+
+void printA(const vector<vector<double>>& A) {
+    for (auto& row : A) {
+        double sum = 0;
+        for (auto val : row) { cout << val << " "; sum += val; }
+        cout << ", sum=" << sum << endl;
+    }
+}
+
+void printBT(const vector<vector<double>>& B) {
+    for (int j = 0; j < M; j++) {
+        cout << ALPHABET[j] << " ";
+        for (int i = 0; i < N; i++) cout << B[i][j] << " ";
+        cout << endl;
+    }
+}
+
+// Initialize pi, A, B randomly
+void initMatricesBandPi(vector<double>& pi, vector<vector<double>>& B) {
+    srand((unsigned)time(0));
+
+    double prob, temp;
+    // pi
+    prob = 1.0 / N;
+    temp = 0;
+    for (int i = 0; i < N; i++) {
+        pi[i] = prob + ((rand() % 2 == 0 ? 1 : -1) * (double)(rand() % 8) / 8.0 * prob / 10.0);
+        temp += pi[i];
+    }
+    for (int i = 0; i < N; i++) pi[i] /= temp;
+
+    // A
+    // for (int i = 0; i < N; i++) {
+    //     temp = 0;
+    //     for (int j = 0; j < N; j++) {
+    //         A[i][j] = prob + ((rand() % 2 == 0 ? 1 : -1) * (double)(rand() % 8) / 8.0 * prob / 10.0);
+    //         temp += A[i][j];
+    //     }
+    //     for (int j = 0; j < N; j++) A[i][j] /= temp;
+    // }
+
+    // B
+    prob = 1.0 / M;
+    for (int i = 0; i < N; i++) {
+        temp = 0;
+        for (int j = 0; j < M; j++) {
+            B[i][j] = prob + ((rand() % 2 == 0 ? 1 : -1) * (double)(rand() % 8) / 8.0 * prob / 10.0);
+            temp += B[i][j];
+        }
+        for (int j = 0; j < M; j++) B[i][j] /= temp;
+    }
+}
+
+// Read observations from text file
+int getObservations(const string& fname, vector<Step>& steps) {
+    ifstream in(fname);
+    if (!in.is_open()) {
+        cerr << "Error opening " << fname << endl;
+        exit(1);
+    }
+
+    string line;
+    int num = 0;
+
+    while (getline(in, line) && num < MAX_T) {
+        // Handle Windows line endings (\r\n)
+        if (!line.empty() && line.back() == '\r') {
+            line.pop_back();
+        }
+
+        for (char c : line) {
+            c = tolower(c);
+            size_t pos = ALPHABET.find(c);
+            if (pos != string::npos) {
+                Step s;       // create a new Step
+                s.obs = (int)pos;
+                steps.push_back(s);
+                num++;
+            }
+            if (num >= MAX_T) break;
+        }
+        if (num >= MAX_T) break;
+    }
+
+    return num; // number of observations
+}
+
+
+// Forward pass
+void alphaPass(vector<Step>& steps, const vector<double>& pi, const vector<vector<double>>& A, const vector<vector<double>>& B, int T) {
+    double sum = 0.0;
+    //compute α0(i)
+    for (int i = 0; i < N; i++) {
+        steps[0].alpha[i] = pi[i] * B[i][steps[0].obs];
+        sum += steps[0].alpha[i];
+    }
+    //scale α0(i)
+    steps[0].c = 1.0 / sum;
+    for (int i = 0; i < N; i++) {
+        steps[0].alpha[i] *= steps[0].c;
+    }
+    //compute αt(i)
+    for (int t = 1; t < T; t++) {
+        sum = 0.0;
+        for (int i = 0; i < N; i++) {
+            steps[t].alpha[i] = 0.0;
+            for (int j = 0; j < N; j++) {
+                steps[t].alpha[i] += steps[t-1].alpha[j] * A[j][i];
+            }
+            steps[t].alpha[i] *= B[i][steps[t].obs];
+            sum += steps[t].alpha[i];
+        }
+        //scale αt(i)
+        steps[t].c = 1.0 / sum;
+        for (int i = 0; i < N; i++) {
+            steps[t].alpha[i] *= steps[t].c;
+        }
+    }
+}
+
+// Backward pass
+void betaPass(vector<Step>& steps, const vector<vector<double>>& A, const vector<vector<double>>& B, int T) {
+    //beta(T-1)[i] = 1 is scaled by c(T-1)
+    for (int i = 0; i < N; i++) {
+        steps[T-1].beta[i] = steps[T-1].c;
+    }
+
+    for (int t = T-2; t >= 0; t--) {
+        for (int i = 0; i < N; i++) {
+            steps[t].beta[i] = 0.0;
+            for (int j = 0; j < N; j++) {
+                steps[t].beta[i] += A[i][j] * B[j][steps[t+1].obs] * steps[t+1].beta[j];
+            }
+            //scale beta(t)[i] with same factor as alpha(t)[i]
+            steps[t].beta[i] *= steps[t].c;
+        }
+    }
+}
+
+// Gamma & DiGamma
+void computeGammas(vector<Step>& steps, const vector<vector<double>>& A, const vector<vector<double>>& B, int T) {
+    for (int t = 0; t < T-1; t++) {
+        double denom = 0.0;
+        for (int i = 0; i < N; i++) {
+            for (int j = 0; j < N; j++) {
+                denom += steps[t].alpha[i] * A[i][j] * B[j][steps[t+1].obs] * steps[t+1].beta[j];
+            }
+        }
+        for (int i = 0; i < N; i++) {
+            steps[t].gamma[i] = 0.0;
+            for (int j = 0; j < N; j++) {
+                steps[t].diGamma[i][j] = (steps[t].alpha[i] * A[i][j] * B[j][steps[t+1].obs] * steps[t+1].beta[j]) / denom;
+                steps[t].gamma[i] += steps[t].diGamma[i][j];
+            }
+        }
+    }
+    //special case for gamma(T-1)[i]
+    double denom = 0.0;
+    for (int i = 0; i < N; i++) {
+        denom += steps[T-1].alpha[i];
+    }
+    for (int i = 0; i < N; i++) {
+        steps[T-1].gamma[i] = steps[T-1].alpha[i] / denom;
+    }
+}
+
+// Re-estimate pi
+void reEstimatePi(vector<Step>& steps, vector<double>& piBar) {
+    for (int i = 0; i < N; i++) piBar[i] = steps[0].gamma[i];
+}
+
+// Re-estimate A - this is not used for this problem
+void reEstimateA(vector<Step>& steps, vector<vector<double>>& Abar, int T) {
+    for (int i = 0; i < N; i++) {
+        for (int j = 0; j < N; j++) {
+            double numer = 0, denom = 0;
+            for (int t = 0; t < T-1; t++) {
+                numer += steps[t].diGamma[i][j];
+                denom += steps[t].gamma[i];
+            }
+            Abar[i][j] = numer / denom;
+        }
+    }
+}
+
+// Re-estimate B
+void reEstimateB(vector<Step>& steps, vector<vector<double>>& Bbar, int T) {
+    for (int i = 0; i < N; i++) {
+        for (int j = 0; j < M; j++) {
+            double numer = 0, denom = 0;
+            for (int t = 0; t < T; t++) {
+                if (steps[t].obs == j) numer += steps[t].gamma[i];
+                denom += steps[t].gamma[i];
+            }
+            Bbar[i][j] = numer / denom;
+        }
+    }
+}
+
+int main(int argc, char* argv[]) {
+    if (argc != 2) {
+        cerr << "Usage: " << argv[0] << " filename" << endl;
+        return 1;
+    }
+
+    string fname = argv[1];
+    int maxIters = 200;
+
+    vector<Step> steps;
+    int T = getObservations(fname, steps);
+    cout << "T = " << T << endl;
+
+    vector<double> pi(N), piBar(N);
+    vector<vector<double>> A(N, vector<double>(N));
+    vector<vector<double>> Abar(N, vector<double>(N));
+    vector<vector<double>> B(N, vector<double>(M));
+    vector<vector<double>> Bbar(N, vector<double>(M));
+
+    initMatricesBandPi(pi, B);
+
+    // State transition probability matrix
+    A = {
+  {0.020318, 0.026740, 0.047397, 0.039540, 0.004099, 0.016241, 0.022882, 0.009490, 0.039079, 0.002597, 0.010433, 0.093710, 0.036318, 0.171562, 0.009863, 0.022784, 0.000679, 0.103671, 0.094882, 0.148219, 0.012274, 0.019255, 0.015079, 0.002389, 0.028997, 0.001501},
+  {0.100728, 0.024486, 0.016399, 0.010648, 0.218348, 0.011861, 0.004538, 0.014332, 0.064920, 0.005796, 0.001752, 0.089541, 0.013119, 0.007188, 0.101402, 0.012310, 0.000674, 0.048387, 0.031045, 0.059889, 0.079252, 0.003504, 0.019993, 0.000225, 0.059349, 0.000314},
+  {0.135266, 0.008445, 0.024494, 0.006313, 0.136640, 0.005752, 0.002329, 0.146797, 0.067282, 0.001291, 0.032547, 0.034819, 0.006706, 0.003928, 0.184030, 0.006594, 0.001122, 0.035156, 0.015937, 0.100558, 0.025925, 0.001543, 0.008137, 0.000196, 0.007912, 0.000281},
+  {0.125616, 0.049482, 0.033063, 0.028663, 0.156241, 0.021749, 0.015639, 0.025344, 0.117520, 0.004325, 0.001760, 0.018857, 0.026702, 0.016117, 0.074701, 0.017902, 0.001735, 0.031354, 0.056924, 0.093257, 0.030700, 0.006437, 0.029242, 0.000126, 0.016217, 0.000327},
+  {0.092317, 0.025804, 0.053652, 0.086211, 0.035990, 0.022938, 0.014107, 0.014148, 0.029119, 0.002476, 0.004636, 0.042320, 0.036928, 0.100816, 0.024575, 0.027499, 0.003124, 0.140785, 0.108035, 0.057141, 0.006954, 0.019307, 0.026834, 0.011498, 0.012254, 0.000532},
+  {0.109212, 0.015097, 0.025070, 0.013192, 0.081920, 0.058573, 0.007752, 0.016547, 0.108804, 0.003491, 0.001813, 0.025705, 0.014779, 0.008251, 0.183607, 0.013419, 0.000680, 0.079518, 0.021897, 0.153187, 0.037265, 0.002221, 0.011878, 0.000227, 0.005486, 0.000408},
+  {0.122489, 0.026086, 0.021616, 0.013096, 0.160776, 0.012307, 0.014673, 0.112023, 0.086463, 0.002367, 0.001052, 0.029347, 0.013148, 0.029136, 0.092721, 0.010939, 0.000631, 0.094983, 0.035185, 0.067003, 0.031556, 0.001999, 0.013411, 0.000263, 0.006469, 0.000263},
+  {0.166832, 0.007542, 0.009541, 0.004375, 0.465933, 0.003187, 0.001821, 0.005364, 0.124312, 0.000752, 0.000534, 0.003523, 0.006037, 0.006889, 0.092521, 0.003642, 0.000178, 0.018726, 0.009858, 0.038679, 0.015183, 0.000990, 0.007364, 0.000099, 0.005998, 0.000119},
+  {0.031280, 0.010656, 0.077385, 0.037640, 0.041234, 0.017774, 0.028654, 0.001306, 0.000856, 0.000351, 0.005251, 0.054852, 0.030213, 0.248105, 0.077006, 0.009968, 0.000870, 0.035744, 0.127043, 0.121876, 0.001446, 0.029848, 0.001530, 0.002036, 0.000112, 0.006964},
+  {0.153202, 0.005911, 0.005419, 0.004433, 0.152709, 0.002956, 0.003941, 0.005911, 0.029064, 0.003448, 0.002463, 0.002956, 0.003941, 0.002956, 0.288670, 0.002956, 0.002463, 0.027094, 0.004926, 0.003448, 0.275862, 0.002463, 0.005419, 0.002463, 0.002463, 0.002463},
+  {0.087480, 0.019092, 0.020188, 0.011268, 0.328638, 0.013459, 0.005321, 0.030360, 0.141471, 0.004695, 0.002504, 0.025196, 0.010798, 0.054773, 0.051017, 0.008764, 0.001252, 0.010329, 0.086385, 0.041628, 0.006103, 0.001721, 0.021127, 0.000782, 0.014867, 0.000782},
+  {0.125686, 0.020106, 0.015708, 0.064957, 0.165487, 0.016215, 0.004591, 0.006718, 0.125976, 0.000870, 0.005341, 0.136029, 0.013557, 0.004519, 0.076799, 0.012566, 0.000580, 0.008337, 0.038448, 0.034146, 0.023296, 0.007395, 0.009086, 0.000121, 0.083202, 0.000266},
+  {0.194144, 0.044677, 0.009590, 0.004951, 0.240458, 0.005185, 0.001481, 0.005692, 0.111536, 0.001248, 0.000780, 0.003509, 0.041090, 0.003898, 0.118514, 0.062883, 0.000273, 0.028108, 0.032240, 0.023742, 0.043078, 0.000819, 0.007329, 0.000195, 0.014346, 0.000234},
+  {0.084680, 0.018933, 0.056928, 0.145653, 0.088198, 0.014374, 0.110978, 0.012138, 0.058053, 0.003205, 0.007365, 0.011853, 0.011739, 0.018192, 0.064307, 0.008989, 0.001168, 0.006397, 0.068353, 0.161239, 0.011710, 0.006254, 0.014403, 0.000256, 0.014018, 0.000613},
+  {0.021885, 0.020351, 0.022876, 0.024234, 0.007956, 0.112494, 0.012395, 0.009055, 0.013305, 0.001493, 0.008621, 0.044694, 0.064203, 0.180811, 0.029108, 0.028592, 0.000516, 0.137122, 0.040811, 0.058976, 0.091492, 0.022184, 0.039657, 0.001168, 0.005471, 0.000529},
+  {0.135726, 0.005057, 0.003204, 0.003354, 0.172725, 0.004205, 0.001101, 0.031491, 0.058476, 0.000651, 0.000751, 0.097627, 0.009212, 0.000751, 0.133423, 0.052118, 0.000250, 0.178282, 0.022780, 0.040553, 0.039902, 0.000300, 0.003955, 0.000250, 0.003605, 0.000250},
+  {0.004570, 0.004570, 0.005484, 0.004570, 0.005484, 0.004570, 0.004570, 0.005484, 0.004570, 0.004570, 0.004570, 0.004570, 0.004570, 0.004570, 0.004570, 0.005484, 0.004570, 0.004570, 0.004570, 0.005484, 0.879342, 0.005484, 0.004570, 0.005484, 0.004570, 0.004570},
+  {0.112224, 0.016000, 0.027313, 0.035571, 0.225225, 0.011184, 0.015337, 0.011006, 0.098649, 0.001648, 0.015159, 0.018973, 0.028670, 0.025438, 0.099457, 0.013123, 0.000630, 0.018052, 0.077736, 0.075425, 0.020202, 0.009648, 0.011491, 0.000178, 0.031272, 0.000388},
+  {0.117529, 0.034245, 0.044853, 0.019025, 0.106997, 0.017001, 0.006255, 0.051444, 0.092507, 0.002146, 0.007366, 0.016057, 0.020882, 0.013424, 0.078200, 0.036117, 0.002009, 0.009299, 0.067181, 0.187130, 0.034610, 0.002298, 0.026498, 0.000244, 0.006484, 0.000198},
+  {0.077267, 0.016367, 0.015022, 0.008100, 0.105322, 0.007644, 0.003133, 0.310289, 0.115978, 0.001044, 0.001333, 0.014556, 0.010122, 0.005011, 0.110133, 0.007011, 0.000333, 0.037722, 0.041656, 0.049000, 0.020722, 0.001189, 0.019356, 0.000067, 0.021067, 0.000556},
+  {0.035458, 0.032661, 0.049555, 0.028972, 0.043341, 0.006097, 0.036118, 0.001282, 0.026758, 0.001010, 0.001903, 0.096897, 0.036700, 0.138840, 0.003651, 0.040623, 0.000233, 0.144627, 0.139617, 0.127850, 0.000388, 0.001748, 0.001320, 0.001282, 0.002524, 0.000544},
+  {0.085052, 0.003339, 0.001670, 0.001768, 0.616382, 0.001080, 0.000687, 0.001080, 0.211059, 0.000884, 0.001179, 0.000884, 0.002259, 0.000687, 0.049990, 0.001179, 0.000589, 0.001670, 0.005107, 0.001768, 0.002161, 0.000982, 0.002652, 0.000491, 0.004911, 0.000491},
+  {0.186037, 0.008454, 0.006441, 0.006441, 0.169072, 0.004083, 0.001553, 0.177756, 0.187130, 0.001553, 0.001898, 0.006671, 0.008339, 0.035942, 0.119616, 0.006096, 0.000575, 0.016045, 0.022313, 0.015470, 0.001725, 0.001380, 0.005866, 0.000288, 0.008914, 0.000345},
+  {0.124004, 0.017928, 0.096116, 0.007470, 0.071713, 0.011454, 0.003984, 0.023406, 0.092629, 0.002988, 0.004482, 0.009462, 0.010956, 0.003486, 0.032371, 0.260458, 0.003486, 0.008466, 0.009462, 0.158865, 0.007470, 0.005478, 0.016434, 0.003486, 0.011454, 0.002490},
+  {0.143524, 0.065023, 0.056511, 0.040669, 0.081752, 0.028315, 0.012768, 0.033103, 0.058876, 0.005557, 0.003429, 0.021931, 0.037063, 0.019093, 0.093929, 0.028137, 0.001478, 0.021812, 0.090619, 0.096057, 0.006975, 0.004079, 0.044925, 0.000355, 0.003074, 0.000946},
+  {0.181987, 0.011142, 0.015785, 0.006500, 0.386258, 0.009285, 0.008357, 0.016713, 0.089136, 0.005571, 0.012071, 0.025998, 0.012071, 0.004643, 0.038069, 0.007428, 0.004643, 0.009285, 0.013928, 0.014856, 0.017642, 0.006500, 0.010214, 0.004643, 0.014856, 0.072423}
+};
+    
+
+    cout << "Initial pi:" << endl; printPi(pi);
+    cout << "Initial A:" << endl; printA(A);
+    cout << "Initial B^T:" << endl; printBT(B);
+
+    double logProb = -numeric_limits<double>::infinity(), newLogProb = 0.0;
+
+    for (int iter = 0; iter < maxIters; iter++) {
+        alphaPass(steps, pi, A, B, T);
+        betaPass(steps, A, B, T);
+        computeGammas(steps, A, B, T);
+        reEstimatePi(steps, piBar);
+        //reEstimateA(steps, Abar, T);
+        reEstimateB(steps, Bbar, T);
+
+        pi = piBar;
+        //A = Abar;
+        B = Bbar;
+
+        newLogProb = 0;
+        for (int t = 0; t < T; t++) newLogProb += log(steps[t].c);
+        newLogProb = -newLogProb;
+
+        cout << fixed << setprecision(5);
+        cout << "Iteration " << iter+1 << " logProb=" << newLogProb << endl;
+        if (newLogProb <= logProb) break;
+        logProb = newLogProb;
+    }
+
+    
+    cout << "Final pi:" << endl; printPi(pi);
+    cout << "Final A:" << endl; printA(A);
+    cout << "Final B^T:" << endl; printBT(B);
+    cout << fixed << setprecision(5);
+    cout << "Final logProb=" << newLogProb << endl;
+
+    
+    // Build putative key from B: for each plaintext i, pick argmax ciphertext k
+    vector<int> putative(N);
+    for (int i = 0; i < N; ++i) {
+        int bestk = 0; double bestp = -1.0;
+        for (int k = 0; k < M; ++k) if (B[i][k] > bestp) { bestp = B[i][k]; bestk = k; }
+        putative[i] = bestk; // ciphertext index predicted for plaintext i
+    }
+
+    // Compare to true Caesar shift
+    int correct = 0;
+    for (int i = 0; i < N; ++i) {
+        int true_k = (i + SHIFT) % 26; // plaintext i -> ciphertext (i+SHIFT)
+        if (putative[i] == true_k) ++correct;
+    }
+    double frac = (double)correct / 26.0;
+
+    // Print results
+    cout << fixed << setprecision(4);
+    cout << "Putative key (plaintext a..z -> ciphertext letters):\n";
+    for (int i = 0; i < N; ++i) {
+        char p = char('a' + i);
+        char c = char('a' + putative[i]);
+        cout << p << "->" << c << (i==N-1?'\n':' ');
+    }
+    cout << "Correct positions: " << correct << "/26\n";
+    cout << "Fraction correct: " << setw(7) << frac << "\n"; // e.g., 0.8462
+
+    return 0;
+}
